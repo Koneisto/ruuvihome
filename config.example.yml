@@ -1,0 +1,136 @@
+# =============================================================================
+# ruuvihome Configuration
+# =============================================================================
+#
+# BLE-to-MQTT bridge for Ruuvi sensors with Home Assistant integration.
+#
+# Quick Start:
+#   1. Copy this file to config.yml
+#   2. Add your Ruuvi device MAC addresses under 'devices:'
+#   3. Adjust MQTT broker address if needed
+#   4. Run: docker compose up -d
+#
+# Documentation: https://github.com/koneisto/ruuvihome
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Bluetooth Settings
+# -----------------------------------------------------------------------------
+# Configure the Bluetooth Low Energy (BLE) adapter used for scanning.
+#
+bluetooth:
+  # HCI adapter index (0 = hci0, 1 = hci1, etc.)
+  # Run 'hciconfig' to see available adapters on your system
+  hci_device: 0
+
+  # BLE scanning parameters - lower values = more responsive but higher CPU
+  # Default values work well for most setups
+  scan_window: 10ms
+  scan_interval: 10ms
+
+# -----------------------------------------------------------------------------
+# MQTT Settings
+# -----------------------------------------------------------------------------
+# Configure connection to your MQTT broker.
+#
+mqtt:
+  # Broker URL - supported schemes: tcp://, ssl://, tls://, ws://, wss://
+  # Examples:
+  #   tcp://localhost:1883        - Unencrypted (local network only)
+  #   ssl://mqtt.example.com:8883 - TLS encrypted
+  broker: tcp://127.0.0.1:1883
+
+  # Client ID - must be unique if multiple clients connect to same broker
+  client_id: ruuvihome
+
+  # Topic prefix - measurements published to: <prefix>/<MAC>
+  # Example: ruuvi/C6:0A:BB:16:1B:8B
+  topic_prefix: ruuvi
+
+  # MQTT QoS level (0 = at most once, 1 = at least once, 2 = exactly once)
+  # QoS 0 is recommended for sensor data - lower latency, less overhead
+  qos: 0
+
+  # Retain messages - if true, broker stores last message per topic
+  # New subscribers receive the last known value immediately
+  retain: false
+
+  # Authentication (optional) - uncomment if your broker requires auth
+  # username: your_username
+  # password: your_password
+
+  # TLS CA certificate (optional) - for self-signed broker certificates
+  # ca_cert: /path/to/ca.crt
+
+# -----------------------------------------------------------------------------
+# Processing Settings
+# -----------------------------------------------------------------------------
+# Control how sensor data is processed and published.
+#
+processing:
+  # Minimum interval between publishes per device
+  # Ruuvi sensors broadcast every ~1 second, but you probably don't need
+  # that frequency. 60s is a good balance for home automation.
+  min_interval: 60s
+
+  # Calculate extended values: dew point, absolute humidity, air density, AQI
+  # These are derived from the raw sensor readings
+  extended_values: true
+
+  # Device filter mode:
+  #   named - Only process devices listed in 'devices:' section below
+  #   all   - Process all Ruuvi devices detected (use with caution!)
+  filter_mode: named
+
+# -----------------------------------------------------------------------------
+# Home Assistant Integration
+# -----------------------------------------------------------------------------
+# Enable MQTT Discovery for automatic sensor creation in Home Assistant.
+#
+homeassistant:
+  # Enable/disable Home Assistant MQTT Discovery
+  # When enabled, sensors appear automatically in HA with proper device info
+  discovery: true
+
+  # Discovery topic prefix - must match HA's MQTT integration config
+  # Default "homeassistant" works with standard HA MQTT setup
+  discovery_prefix: homeassistant
+
+# -----------------------------------------------------------------------------
+# Device Configuration
+# -----------------------------------------------------------------------------
+# List your Ruuvi devices here. The MAC address is used as the key.
+# Find your device MAC addresses:
+#   - Ruuvi Station app (Settings > See Raw Sensor Data)
+#   - Run: sudo hcitool lescan
+#
+# Format: "XX:XX:XX:XX:XX:XX:" (note the trailing colon)
+#
+devices:
+  # Example RuuviTag
+  # AA:BB:CC:DD:EE:FF:
+  #   name: living_room
+  #   min_interval: 30s    # Optional: override global min_interval
+
+  # Example Ruuvi Air
+  # 11:22:33:44:55:66:
+  #   name: bedroom
+
+  # Add your devices below:
+  # XX:XX:XX:XX:XX:XX:
+  #   name: your_device_name
+
+# -----------------------------------------------------------------------------
+# Logging Settings
+# -----------------------------------------------------------------------------
+# Configure application logging.
+#
+logging:
+  # Log level: trace, debug, info, warn, error
+  # Use 'debug' to see all MQTT publishes, 'trace' for BLE packet details
+  level: info
+
+  # Log format: simple or json
+  # 'json' format is useful for log aggregation systems
+  format: simple

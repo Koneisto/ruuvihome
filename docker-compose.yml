@@ -1,0 +1,29 @@
+services:
+  ruuvihome:
+    build: .
+    container_name: ruuvihome
+    hostname: ruuvihome
+    restart: unless-stopped
+    # Raw HCI sockets (AF_BLUETOOTH) require host networking
+    # This is a Linux kernel limitation, not a software choice
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=10M,mode=1777
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.5'
+        reservations:
+          memory: 16M
+    # user: "1000:1000"  # BLE HCI requires root for device initialization
+    volumes:
+      - ./config.yml:/config.yml:ro
