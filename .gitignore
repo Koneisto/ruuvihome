@@ -1,0 +1,28 @@
+# Configuration with secrets
+config.yml
+
+# Build artifacts
+ruuvihome
+*.exe
+
+# Go build cache
+*.test
+*.out
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
