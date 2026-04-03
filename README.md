@@ -5,6 +5,7 @@ Lightweight BLE-to-MQTT bridge for Ruuvi sensors with Home Assistant auto-discov
 ## Features
 
 - **Direct BLE to MQTT** - No intermediate services or cloud dependencies
+- **Dual BLE Backend** - HCI (direct) and D-Bus (BlueZ) with automatic detection
 - **Home Assistant MQTT Discovery** - Sensors appear automatically with proper device grouping
 - **Multiple Sensor Formats** - Supports RuuviTag (Format 5/E1) and Ruuvi Air (Format 6/E1)
 - **Calculated Values** - Dew point, absolute humidity, air density, and Air Quality Index
@@ -27,10 +28,38 @@ docker compose up -d
 |---------|---------|
 | Single container | Simple and lightweight, nothing else needed |
 | Direct BLE to MQTT | No intermediate services, minimal latency |
+| Dual BLE backend | Works on any Linux system, auto-detects the right method |
 | HA Auto-Discovery | Sensors appear in Home Assistant automatically |
 | Tiny footprint | 1.9MB image, ~10MB RAM |
 | Full precision MQTT | Raw values available for custom processing |
 | Rounded HA values | European display standards in Home Assistant |
+
+## BLE Backend Selection
+
+ruuvihome supports two methods for receiving Bluetooth advertisements:
+
+| Backend | Method | Best For |
+|---------|--------|----------|
+| **HCI** | Direct HCI socket via go-ble | Dedicated containers, servers without BlueZ |
+| **D-Bus** | BlueZ daemon via godbus | Desktop Linux, Raspberry Pi OS, shared adapter |
+| **Auto** | Tries HCI, falls back to D-Bus | Most users (default) |
+
+```yaml
+bluetooth:
+  backend: auto   # "auto", "hci", or "dbus"
+```
+
+### Platform Compatibility
+
+| Platform | Recommended Backend |
+|----------|-------------------|
+| Docker on Linux server | `hci` or `auto` |
+| Raspberry Pi OS | `dbus` or `auto` |
+| Ubuntu/Debian desktop | `dbus` or `auto` |
+| Alpine Linux (minimal) | `hci` |
+| Docker on macOS/Windows | Not supported (no BLE passthrough) |
+
+For detailed backend information, see [docs/BACKENDS.md](docs/BACKENDS.md).
 
 ## Configuration
 
@@ -39,13 +68,16 @@ Copy `config.example.yml` to `config.yml` and configure:
 ### Essential Settings
 
 ```yaml
+bluetooth:
+  backend: auto                       # BLE backend: auto, hci, or dbus
+
 mqtt:
-  broker: tcp://192.168.1.100:1883  # Your MQTT broker
-  topic_prefix: ruuvi               # Topics: ruuvi/<MAC>
+  broker: tcp://192.168.1.100:1883    # Your MQTT broker
+  topic_prefix: ruuvi                 # Topics: ruuvi/<MAC>
 
 devices:
-  AA:BB:CC:DD:EE:FF:                # Your Ruuvi MAC address
-    name: living_room               # Friendly name for HA
+  AA:BB:CC:DD:EE:FF:                  # Your Ruuvi MAC address
+    name: living_room                 # Friendly name for HA
 ```
 
 ### Finding Your Device MAC Addresses
@@ -92,7 +124,7 @@ Standard RuuviTag sensors broadcasting Format 5 (RAWv2):
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| temperature | °C | -40 to +85 °C, 0.005° resolution |
+| temperature | C | -40 to +85 C, 0.005 resolution |
 | humidity | % | 0-100%, 0.0025% resolution |
 | pressure | Pa | Atmospheric pressure |
 | acceleration_x/y/z | mG | Movement in 3 axes |
@@ -107,10 +139,10 @@ Ruuvi Air sensors with air quality measurements:
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| temperature | °C | Ambient temperature |
+| temperature | C | Ambient temperature |
 | humidity | % | Relative humidity |
 | pressure | Pa | Atmospheric pressure |
-| pm2_5 | µg/m³ | PM2.5 particulate matter |
+| pm2_5 | ug/m3 | PM2.5 particulate matter |
 | co2 | ppm | Carbon dioxide |
 | voc_index | 1-500 | Volatile organic compounds index |
 | nox_index | 1-500 | Nitrogen oxides index |
@@ -123,7 +155,7 @@ Alternative data format with additional sensors:
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| pm1_0, pm2_5, pm4_0, pm10_0 | µg/m³ | Full PM spectrum |
+| pm1_0, pm2_5, pm4_0, pm10_0 | ug/m3 | Full PM spectrum |
 | co2 | ppm | Carbon dioxide |
 | voc_index, nox_index | 1-500 | Gas indices |
 | luminosity | lux | Light level |
@@ -134,9 +166,9 @@ When `extended_values: true` (default):
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| dew_point | °C | Temperature at which condensation occurs |
-| absolute_humidity | g/m³ | Water vapor mass per volume |
-| air_density | kg/m³ | Calculated from temp, humidity, pressure |
+| dew_point | C | Temperature at which condensation occurs |
+| absolute_humidity | g/m3 | Water vapor mass per volume |
+| air_density | kg/m3 | Calculated from temp, humidity, pressure |
 | air_quality_index | 0-500 | Combined AQI (Ruuvi Air only) |
 
 ## MQTT Output
@@ -210,7 +242,7 @@ homeassistant/sensor/ruuvi_aabbccddeeff_humidity/config
 
 ### Sensor Entities Created
 
-For a RuuviTag named "living_room", you'll see:
+For a RuuviTag named "living_room", you will see:
 - `sensor.living_room_temperature`
 - `sensor.living_room_humidity`
 - `sensor.living_room_pressure`
@@ -227,10 +259,10 @@ For Ruuvi Air, additional entities:
 ### Display Precision
 
 Home Assistant templates apply European standard rounding:
-- Temperature: 2 decimal places (21.35 °C)
+- Temperature: 2 decimal places (21.35 C)
 - Humidity: 2 decimal places (45.67 %)
 - Pressure: whole numbers (101325 Pa)
-- PM values: 1 decimal place (5.2 µg/m³)
+- PM values: 1 decimal place (5.2 ug/m3)
 
 Raw MQTT values retain full precision for custom automations.
 
@@ -244,31 +276,59 @@ mqtt:
     - name: "Living Room Temperature"
       state_topic: "ruuvi/AA:BB:CC:DD:EE:FF"
       value_template: "{{ value_json.temperature | round(1) }}"
-      unit_of_measurement: "°C"
+      unit_of_measurement: "C"
       device_class: temperature
 ```
 
 ## Architecture
 
+### BLE Backend Architecture
+
+```
+                      +-----------------+
+                      |   Scanner       |
+                      | (backend selector)|
+                      +--------+--------+
+                               |
+                  +------------+------------+
+                  |                         |
+          +-------+-------+       +--------+--------+
+          |  HCI Backend  |       | D-Bus Backend   |
+          |  (go-ble/ble) |       | (godbus/dbus)   |
+          +-------+-------+       +--------+--------+
+                  |                         |
+          +-------+-------+       +--------+--------+
+          | HCI Socket    |       | BlueZ Daemon    |
+          | (AF_BLUETOOTH)|       | (org.bluez)     |
+          +-------+-------+       +--------+--------+
+                  |                         |
+                  +------------+------------+
+                               |
+                      +--------+--------+
+                      |  BLE Adapter    |
+                      |  (hci0)         |
+                      +-----------------+
+```
+
 ### Why Host Networking?
 
 ruuvihome requires `network_mode: host` because Linux Bluetooth (HCI) sockets operate at the kernel level using `AF_BLUETOOTH`. Docker's network namespacing cannot bridge raw HCI sockets.
 
-This is a Linux kernel limitation, not a software design choice.
+This is a Linux kernel limitation, not a software design choice. The D-Bus backend also benefits from host networking for reliable access to the system D-Bus.
 
 ### Data Flow
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Ruuvi Tag  │────>│  BLE/HCI    │────>│  ruuvihome  │────>│    MQTT     │
-│  (BLE Adv)  │     │  (hci0)     │     │  (Parser)   │     │   Broker    │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-                                               │
++-------------+     +-------------+     +-------------+     +-------------+
+|  Ruuvi Tag  |---->|  BLE/HCI or |---->|  ruuvihome  |---->|    MQTT     |
+|  (BLE Adv)  |     |  BLE/D-Bus  |     |  (Parser)   |     |   Broker    |
++-------------+     +-------------+     +-------------+     +-------------+
+                                               |
                                                v
-                                        ┌─────────────┐
-                                        │ Home Asst.  │
-                                        │ (Discovery) │
-                                        └─────────────┘
+                                        +-------------+
+                                        | Home Asst.  |
+                                        | (Discovery) |
+                                        +-------------+
 ```
 
 ### Security Hardening
@@ -311,7 +371,7 @@ docker compose build
 ```
 
 The Dockerfile uses a multi-stage build:
-1. Builds with Go 1.22 Alpine
+1. Builds with Go 1.22 Alpine (includes bluez-dev for D-Bus support)
 2. Compresses with UPX (~60% size reduction)
 3. Runs from scratch (no OS layer)
 
@@ -323,6 +383,7 @@ The Dockerfile uses a multi-stage build:
 2. Verify adapter is up: `sudo hciconfig hci0 up`
 3. Test scanning: `sudo hcitool lescan`
 4. Check container has BLE access: ensure `network_mode: host`
+5. Try a different backend: `bluetooth.backend: dbus`
 
 ### Permission denied
 
@@ -331,6 +392,15 @@ BLE HCI requires root or `CAP_NET_ADMIN` + `CAP_NET_RAW`. The Docker container h
 ```bash
 sudo setcap 'cap_net_raw,cap_net_admin+eip' ./ruuvihome
 ```
+
+### HCI device busy
+
+BlueZ may have claimed the adapter. Switch to the D-Bus backend:
+```yaml
+bluetooth:
+  backend: dbus
+```
+Or stop BlueZ: `sudo systemctl stop bluetooth`
 
 ### Device not publishing
 
@@ -353,6 +423,8 @@ sudo setcap 'cap_net_raw,cap_net_admin+eip' ./ruuvihome
 3. Look for discovery messages: `mosquitto_sub -h <broker> -t homeassistant/sensor/#`
 4. Restart HA MQTT integration if needed
 
+For more details, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
 ## Acknowledgments
 
 Special thanks to [Scrin/RuuviBridge](https://github.com/Scrin/RuuviBridge) - the original Ruuvi-to-MQTT bridge that inspired this project and served reliably for years.
@@ -360,6 +432,7 @@ Special thanks to [Scrin/RuuviBridge](https://github.com/Scrin/RuuviBridge) - th
 This project builds upon:
 
 - [go-ble/ble](https://github.com/go-ble/ble) - Pure Go Bluetooth Low Energy library
+- [godbus/dbus](https://github.com/godbus/dbus) - Native Go D-Bus bindings
 - [Ruuvi](https://ruuvi.com/) - Sensor hardware and [data format documentation](https://docs.ruuvi.com/)
 - [Eclipse Paho](https://github.com/eclipse/paho.mqtt.golang) - MQTT client library
 - [goccy/go-json](https://github.com/goccy/go-json) - High-performance JSON encoder

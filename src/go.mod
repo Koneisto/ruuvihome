@@ -6,6 +6,7 @@ require (
 	github.com/eclipse/paho.mqtt.golang v1.4.3
 	github.com/goccy/go-json v0.10.2
 	github.com/go-ble/ble v0.0.0-20240122180141-8c5522f54333
+	github.com/godbus/dbus/v5 v5.1.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
