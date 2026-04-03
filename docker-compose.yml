@@ -4,8 +4,9 @@ services:
     container_name: ruuvihome
     hostname: ruuvihome
     restart: unless-stopped
-    # Raw HCI sockets (AF_BLUETOOTH) require host networking
-    # This is a Linux kernel limitation, not a software choice
+    # Raw HCI sockets (AF_BLUETOOTH) require host networking.
+    # This is a Linux kernel limitation, not a software choice.
+    # The D-Bus backend also benefits from host networking for BlueZ access.
     network_mode: host
     cap_drop:
       - ALL
@@ -27,3 +28,7 @@ services:
     # user: "1000:1000"  # BLE HCI requires root for device initialization
     volumes:
       - ./config.yml:/config.yml:ro
+      # D-Bus socket: required when using the "dbus" backend.
+      # Mount the host D-Bus socket so the container can talk to BlueZ.
+      # Not needed when using "hci" backend only.
+      - /var/run/dbus:/var/run/dbus:ro

@@ -20,7 +20,18 @@
 # Configure the Bluetooth Low Energy (BLE) adapter used for scanning.
 #
 bluetooth:
+  # BLE backend selection:
+  #   auto - (default) tries HCI first, falls back to D-Bus if HCI fails
+  #   hci  - direct HCI socket via go-ble (requires CAP_NET_ADMIN + CAP_NET_RAW)
+  #   dbus - BlueZ D-Bus interface via godbus (requires system D-Bus access)
+  #
+  # Use "hci" for dedicated containers with host networking.
+  # Use "dbus" on systems where BlueZ manages the adapter (desktop Linux, RPi OS).
+  # Use "auto" if you are unsure - it will pick the right one automatically.
+  backend: auto
+
   # HCI adapter index (0 = hci0, 1 = hci1, etc.)
+  # Only used when backend is "hci" or "auto" (for HCI probe).
   # Run 'hciconfig' to see available adapters on your system
   hci_device: 0
 

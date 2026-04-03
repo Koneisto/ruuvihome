@@ -1,5 +1,7 @@
 # Configuration with secrets
 config.yml
+*.env
+*.env.*
 
 # Build artifacts
 ruuvihome
@@ -8,6 +10,9 @@ ruuvihome
 # Go build cache
 *.test
 *.out
+
+# Dependencies
+vendor/
 
 # IDE/Editor
 .idea/

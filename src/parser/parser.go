@@ -95,7 +95,10 @@ func (p *Parser) Parse(data []byte) (*Measurement, error) {
 	case Format6:
 		m, err = ParseFormat6(data)
 	case FormatE1:
-		// TODO: Waiting for Go BLE libs to discover Bluetooth 5. Any decade now.
+		// TODO: Format E1 uses Bluetooth 5 extended advertising, which is not
+		// yet supported by the go-ble HCI library. The D-Bus backend receives
+		// E1 data correctly since BlueZ handles extended advertising natively.
+		// Parsing is implemented but reception depends on the active backend.
 		m, err = ParseFormatE1(data)
 	default:
 		return nil, ErrInvalidFormat
@@ -172,9 +175,9 @@ func calculateDewPointFast(temp, humidity float64) float64 {
 // calculateAbsoluteHumidityFast calculates absolute humidity using pre-calculated vapor pressure
 func calculateAbsoluteHumidityFast(temp, vaporPressure float64) float64 {
 	const mw = 18.016 // Molar mass of water g/mol
-	const r = 8.314   // Universal gas constant J/(mol·K)
+	const r = 8.314   // Universal gas constant J/(mol*K)
 
-	// Absolute humidity (g/m³)
+	// Absolute humidity (g/m3)
 	absHumidity := (vaporPressure * mw) / (r * (temp + 273.15))
 
 	return absHumidity
@@ -182,8 +185,8 @@ func calculateAbsoluteHumidityFast(temp, vaporPressure float64) float64 {
 
 // calculateAirDensityFast calculates air density using pre-calculated vapor pressure
 func calculateAirDensityFast(temp, vaporPressure float64, pressure int) float64 {
-	const rd = 287.058 // Specific gas constant for dry air J/(kg·K)
-	const rv = 461.495 // Specific gas constant for water vapor J/(kg·K)
+	const rd = 287.058 // Specific gas constant for dry air J/(kg*K)
+	const rv = 461.495 // Specific gas constant for water vapor J/(kg*K)
 
 	// Temperature in Kelvin
 	tk := temp + 273.15

@@ -23,6 +23,7 @@ type Config struct {
 // BluetoothConfig contains BLE scanner settings
 type BluetoothConfig struct {
 	HCIDevice    int           `yaml:"hci_device"`
+	Backend      string        `yaml:"backend"`
 	ScanWindow   time.Duration `yaml:"scan_window"`
 	ScanInterval time.Duration `yaml:"scan_interval"`
 }
@@ -75,6 +76,7 @@ func Load(path string) (*Config, error) {
 		// Set defaults
 		Bluetooth: BluetoothConfig{
 			HCIDevice:    0,
+			Backend:      "auto",
 			ScanWindow:   10 * time.Millisecond,
 			ScanInterval: 10 * time.Millisecond,
 		},
@@ -131,6 +133,19 @@ func (c *Config) Validate() error {
 	}
 	if !hasValidScheme {
 		return fmt.Errorf("invalid broker URL scheme: must start with tcp://, ssl://, tls://, ws://, or wss://")
+	}
+
+	// Validate BLE backend
+	validBackends := []string{"auto", "hci", "dbus", ""}
+	backendValid := false
+	for _, b := range validBackends {
+		if c.Bluetooth.Backend == b {
+			backendValid = true
+			break
+		}
+	}
+	if !backendValid {
+		return fmt.Errorf("invalid bluetooth.backend: must be 'auto', 'hci', or 'dbus'")
 	}
 
 	// Validate filter mode
