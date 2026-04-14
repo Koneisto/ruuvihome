@@ -3,6 +3,7 @@ package ble
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"ruuvihome/config"
@@ -24,6 +25,9 @@ type backendScanner interface {
 // It delegates to the selected backend (HCI or D-Bus).
 type Scanner struct {
 	backend backendScanner
+	// LastAdvTime stores the unix millisecond timestamp of the last received advertisement.
+	// Used by the watchdog to detect if the BLE scanner has hung.
+	LastAdvTime atomic.Int64
 }
 
 // NewScanner creates a new BLE scanner using the configured backend.
@@ -32,6 +36,14 @@ type Scanner struct {
 //   - "hci":  uses go-ble/ble with direct HCI socket access
 //   - "dbus": uses BlueZ D-Bus interface via godbus
 func NewScanner(cfg *config.Config, logger *config.Logger, handler AdvertisementHandler) (*Scanner, error) {
+	s := &Scanner{}
+
+	// Wrap handler to update watchdog timestamp on every advertisement
+	wrappedHandler := func(addr string, rssi int, data []byte) {
+		s.LastAdvTime.Store(time.Now().UnixMilli())
+		handler(addr, rssi, data)
+	}
+
 	backend := cfg.Bluetooth.Backend
 	if backend == "" {
 		backend = "auto"
@@ -40,21 +52,22 @@ func NewScanner(cfg *config.Config, logger *config.Logger, handler Advertisement
 	switch backend {
 	case "hci":
 		logger.Info("Using HCI backend (go-ble)")
-		b := newHCIScanner(cfg, logger, handler)
-		return &Scanner{backend: b}, nil
+		s.backend = newHCIScanner(cfg, logger, wrappedHandler)
+		return s, nil
 
 	case "dbus":
 		logger.Info("Using D-Bus backend (BlueZ)")
-		b := newDBusScanner(cfg, logger, handler)
-		return &Scanner{backend: b}, nil
+		s.backend = newDBusScanner(cfg, logger, wrappedHandler)
+		return s, nil
 
 	case "auto":
 		logger.Info("Auto-detecting BLE backend...")
-		scanner, err := autoDetectBackend(cfg, logger, handler)
+		b, err := autoDetectBackend(cfg, logger, wrappedHandler)
 		if err != nil {
 			return nil, err
 		}
-		return &Scanner{backend: scanner}, nil
+		s.backend = b
+		return s, nil
 
 	default:
 		return nil, fmt.Errorf("unknown BLE backend %q: must be \"auto\", \"hci\", or \"dbus\"", backend)
@@ -91,6 +104,8 @@ func autoDetectBackend(cfg *config.Config, logger *config.Logger, handler Advert
 
 // Start begins BLE scanning using the selected backend
 func (s *Scanner) Start(ctx context.Context) error {
+	// Seed watchdog timer so it doesn't fire during startup
+	s.LastAdvTime.Store(time.Now().UnixMilli())
 	return s.backend.Start(ctx)
 }
 

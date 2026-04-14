@@ -26,6 +26,17 @@ services:
         reservations:
           memory: 16M
     # user: "1000:1000"  # BLE HCI requires root for device initialization
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/ruuvihome", "-healthcheck"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     volumes:
       - ./config.yml:/config.yml:ro
       # D-Bus socket: required when using the "dbus" backend.

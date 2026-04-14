@@ -4,10 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,15 +21,36 @@ import (
 )
 
 var (
-	configPath = flag.String("config", "/config.yml", "Path to configuration file")
-	version    = "1.0.0"
+	configPath  = flag.String("config", "/config.yml", "Path to configuration file")
+	healthcheck = flag.Bool("healthcheck", false, "Run health check and exit")
+	version     = "1.1.0"
+)
+
+const (
+	healthPort       = 8098
+	watchdogTimeout  = 120 * time.Second
+	watchdogInterval = 30 * time.Second
+	publishQueueSize = 16
 )
 
 // macCache caches sanitized MAC addresses to avoid repeated string allocations
 var macCache sync.Map
 
+// lastPublishTime tracks the last successful MQTT publish (unix milliseconds)
+var lastPublishTime atomic.Int64
+
 func main() {
 	flag.Parse()
+
+	// Health check client mode: probe the running instance and exit
+	if *healthcheck {
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", healthPort))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// Load configuration
 	cfg, err := config.Load(*configPath)
@@ -69,6 +92,12 @@ func main() {
 	logger.Info("Shutdown complete")
 }
 
+// publishJob is sent through the async publish channel
+type publishJob struct {
+	measurement *parser.Measurement
+	sanitized   string
+}
+
 func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 	// Create MQTT client
 	mqttClient, err := mqtt.NewClient(cfg, logger)
@@ -100,7 +129,29 @@ func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 	// Track discovered devices for HA discovery
 	var discoveredDevices sync.Map
 
-	// Create BLE scanner with advertisement handler
+	// Async publish channel — decouples BLE callback from MQTT I/O
+	publishCh := make(chan publishJob, publishQueueSize)
+
+	// Publisher goroutine — handles all MQTT publishes off the BLE thread
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-publishCh:
+				if err := mqttClient.Publish(ctx, job.measurement); err != nil {
+					logger.Error("Failed to publish", "mac", job.sanitized, "error", err)
+				} else {
+					lastPublishTime.Store(time.Now().UnixMilli())
+					logger.Info("Published measurement",
+						"mac", job.sanitized,
+						"name", job.measurement.Name)
+				}
+			}
+		}
+	}()
+
+	// Create BLE scanner with non-blocking advertisement handler
 	scanner, err := ble.NewScanner(cfg, logger, func(addr string, rssi int, manufacturerData []byte) {
 		// Normalize MAC to uppercase (go-ble returns lowercase)
 		addr = strings.ToUpper(addr)
@@ -138,7 +189,7 @@ func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 			measurement.Name = deviceConfig.Name
 		}
 
-		// Publish Home Assistant discovery (once per device)
+		// Publish Home Assistant discovery (once per device, kept synchronous)
 		if haDiscovery != nil {
 			if _, discovered := discoveredDevices.Load(addr); !discovered {
 				if err := haDiscovery.PublishDiscovery(ctx, measurement); err != nil {
@@ -150,22 +201,43 @@ func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 			}
 		}
 
-		// Publish measurement to MQTT
-		if err := mqttClient.Publish(ctx, measurement); err != nil {
-			logger.Error("Failed to publish measurement", "mac", sanitized, "error", err)
-			return
+		// Non-blocking send to async publish channel
+		select {
+		case publishCh <- publishJob{measurement: measurement, sanitized: sanitized}:
+			logger.Debug("Queued measurement",
+				"mac", sanitized,
+				"name", measurement.Name,
+				"temp", measurement.Temperature,
+				"humidity", measurement.Humidity,
+				"format", measurement.Format)
+		default:
+			logger.Warn("Publish queue full, dropping measurement", "mac", sanitized)
 		}
-
-		logger.Debug("Published measurement",
-			"mac", sanitized,
-			"name", measurement.Name,
-			"temp", measurement.Temperature,
-			"humidity", measurement.Humidity,
-			"format", measurement.Format)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create BLE scanner: %w", err)
 	}
+
+	// Start health server
+	go startHealthServer(logger, scanner, cfg.Processing.MinInterval)
+
+	// Start watchdog — exits process if BLE scanner hangs (Docker restarts it)
+	go func() {
+		ticker := time.NewTicker(watchdogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				last := scanner.LastAdvTime.Load()
+				if last > 0 && time.Since(time.UnixMilli(last)) > watchdogTimeout {
+					logger.Error("Watchdog: no BLE advertisements for >120s, exiting for restart")
+					os.Exit(1)
+				}
+			}
+		}
+	}()
 
 	// Start scanning
 	logger.Info("Starting BLE scan", "hci_device", cfg.Bluetooth.HCIDevice)
@@ -175,6 +247,54 @@ func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 	}
 
 	return nil
+}
+
+// startHealthServer runs an HTTP health endpoint for Docker HEALTHCHECK
+func startHealthServer(logger *config.Logger, scanner *ble.Scanner, minInterval time.Duration) {
+	threshold := 2 * minInterval
+	if threshold < watchdogTimeout {
+		threshold = watchdogTimeout
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		lastAdv := scanner.LastAdvTime.Load()
+		lastPub := lastPublishTime.Load()
+
+		advAge := time.Since(time.UnixMilli(lastAdv))
+
+		healthy := lastAdv > 0 && advAge < threshold
+
+		w.Header().Set("Content-Type", "application/json")
+		if healthy {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+
+		var pubAgo string
+		if lastPub > 0 {
+			pubAgo = time.Since(time.UnixMilli(lastPub)).Round(time.Second).String()
+		} else {
+			pubAgo = "never"
+		}
+
+		fmt.Fprintf(w, `{"healthy":%t,"last_advertisement_ago":"%s","last_publish_ago":"%s"}`,
+			healthy,
+			advAge.Round(time.Second),
+			pubAgo)
+	})
+
+	server := &http.Server{
+		Addr:              fmt.Sprintf("127.0.0.1:%d", healthPort),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	logger.Info("Health server started", "port", healthPort)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Error("Health server failed", "error", err)
+	}
 }
 
 // getSanitizedMAC returns a cached partially masked MAC address for logging
