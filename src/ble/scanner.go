@@ -32,7 +32,7 @@ type Scanner struct {
 
 // NewScanner creates a new BLE scanner using the configured backend.
 // The backend is selected based on config.Bluetooth.Backend:
-//   - "auto" (default): tries HCI first, falls back to D-Bus if HCI fails within 5s
+//   - "auto" (default): tries D-Bus first (coexists with BlueZ), falls back to HCI
 //   - "hci":  uses go-ble/ble with direct HCI socket access
 //   - "dbus": uses BlueZ D-Bus interface via godbus
 func NewScanner(cfg *config.Config, logger *config.Logger, handler AdvertisementHandler) (*Scanner, error) {
@@ -74,10 +74,21 @@ func NewScanner(cfg *config.Config, logger *config.Logger, handler Advertisement
 	}
 }
 
-// autoDetectBackend tries HCI first with a 5-second timeout.
-// If HCI initialization fails, it falls back to D-Bus.
+// autoDetectBackend tries D-Bus first (cooperative with BlueZ), then falls
+// back to HCI (takes exclusive control of the adapter).
+//
+// D-Bus is preferred because it coexists with BlueZ — this avoids the race
+// condition where HCI probe succeeds but the subsequent scan conflicts with
+// BlueZ, which is the default on Raspberry Pi and most desktop Linux systems.
 func autoDetectBackend(cfg *config.Config, logger *config.Logger, handler AdvertisementHandler) (backendScanner, error) {
-	// Try HCI with a timeout
+	// Try D-Bus first — cooperative with BlueZ
+	if probeDBus() {
+		logger.Info("BlueZ adapter found via D-Bus, using D-Bus backend")
+		return newDBusScanner(cfg, logger, handler), nil
+	}
+	logger.Info("D-Bus/BlueZ not available, trying HCI backend")
+
+	// Fall back to HCI — takes exclusive control of the adapter
 	hci := newHCIScanner(cfg, logger, handler)
 
 	probeCh := make(chan error, 1)
@@ -91,15 +102,10 @@ func autoDetectBackend(cfg *config.Config, logger *config.Logger, handler Advert
 			logger.Info("HCI backend available, using HCI")
 			return hci, nil
 		}
-		logger.Info("HCI backend not available, falling back to D-Bus", "error", err)
+		return nil, fmt.Errorf("no BLE backend available: D-Bus/BlueZ not found, HCI failed: %w", err)
 	case <-time.After(5 * time.Second):
-		logger.Info("HCI probe timed out after 5s, falling back to D-Bus")
+		return nil, fmt.Errorf("no BLE backend available: D-Bus/BlueZ not found, HCI probe timed out")
 	}
-
-	// Fall back to D-Bus
-	dbus := newDBusScanner(cfg, logger, handler)
-	logger.Info("Using D-Bus backend (BlueZ)")
-	return dbus, nil
 }
 
 // Start begins BLE scanning using the selected backend
