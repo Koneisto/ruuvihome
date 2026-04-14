@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 
 	"ruuvihome/config"
 )
+
+// Discovery keepalive interval — BlueZ may stop discovery automatically
+// after ~3 minutes. Restarting it periodically ensures continuous scanning.
+const discoveryKeepalive = 2 * time.Minute
 
 // dbusScanner uses the BlueZ D-Bus interface for BLE scanning.
 // This backend does not require raw HCI access and works well
@@ -29,6 +34,30 @@ func newDBusScanner(cfg *config.Config, logger *config.Logger, handler Advertise
 		logger:  logger,
 		handler: handler,
 	}
+}
+
+// probeDBus checks whether BlueZ is available on the system D-Bus and has
+// at least one BLE adapter. This is used by auto-detection to decide
+// whether to use the D-Bus backend.
+func probeDBus() bool {
+	bus, err := dbus.SystemBus()
+	if err != nil {
+		return false
+	}
+	defer bus.Close()
+
+	bluez := bus.Object("org.bluez", "/")
+	var result map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+	if err := bluez.Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&result); err != nil {
+		return false
+	}
+
+	for _, ifaces := range result {
+		if _, ok := ifaces["org.bluez.Adapter1"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // findAdapter auto-detects the first available BlueZ adapter via D-Bus
@@ -75,14 +104,24 @@ func (s *dbusScanner) Start(ctx context.Context) error {
 		s.logger.Info("Could not power on adapter (may already be on)", "error", err)
 	}
 
-	// Set discovery filter for BLE only with duplicate data enabled
+	// Set discovery filter for BLE only with duplicate data enabled.
+	// DuplicateData is critical for continuous sensor monitoring —
+	// without it, BlueZ only reports each device once per discovery session.
 	filter := map[string]dbus.Variant{
 		"Transport":     dbus.MakeVariant("le"),
 		"DuplicateData": dbus.MakeVariant(true),
 	}
 	err = adapter.Call("org.bluez.Adapter1.SetDiscoveryFilter", 0, filter).Err
 	if err != nil {
-		s.logger.Info("Could not set discovery filter", "error", err)
+		// DuplicateData may not be supported on older BlueZ (<5.56).
+		// Try without it — we'll use keepalive restarts as a workaround.
+		s.logger.Warn("SetDiscoveryFilter failed, retrying without DuplicateData", "error", err)
+		filter = map[string]dbus.Variant{
+			"Transport": dbus.MakeVariant("le"),
+		}
+		if err2 := adapter.Call("org.bluez.Adapter1.SetDiscoveryFilter", 0, filter).Err; err2 != nil {
+			s.logger.Warn("SetDiscoveryFilter failed completely", "error", err2)
+		}
 	}
 
 	// Subscribe to BlueZ signals (InterfacesAdded and PropertiesChanged)
@@ -104,6 +143,11 @@ func (s *dbusScanner) Start(ctx context.Context) error {
 		s.bus.RemoveSignal(signalCh)
 	}()
 
+	// Keepalive timer — restart discovery periodically.
+	// BlueZ may stop discovery after ~3 minutes on some systems.
+	keepalive := time.NewTicker(discoveryKeepalive)
+	defer keepalive.Stop()
+
 	// Process signals until context is cancelled
 	for {
 		select {
@@ -111,6 +155,14 @@ func (s *dbusScanner) Start(ctx context.Context) error {
 			return nil
 		case sig := <-signalCh:
 			s.processSignal(sig)
+		case <-keepalive.C:
+			// Restart discovery to keep it active
+			adapter.Call("org.bluez.Adapter1.StopDiscovery", 0)
+			if err := adapter.Call("org.bluez.Adapter1.StartDiscovery", 0).Err; err != nil {
+				s.logger.Warn("Discovery keepalive restart failed", "error", err)
+			} else {
+				s.logger.Debug("Discovery keepalive restart")
+			}
 		}
 	}
 }
@@ -150,7 +202,9 @@ func (s *dbusScanner) processSignal(sig *dbus.Signal) {
 	}
 }
 
-// handleDeviceProperties extracts Ruuvi data from device properties
+// handleDeviceProperties extracts Ruuvi data from device properties.
+// Handles multiple D-Bus type formats for ManufacturerData across
+// different BlueZ versions.
 func (s *dbusScanner) handleDeviceProperties(path dbus.ObjectPath, props map[string]dbus.Variant) {
 	// Get ManufacturerData
 	mfgDataVar, ok := props["ManufacturerData"]
@@ -160,19 +214,10 @@ func (s *dbusScanner) handleDeviceProperties(path dbus.ObjectPath, props map[str
 
 	s.logger.Trace("ManufacturerData signal", "path", string(path), "type", fmt.Sprintf("%T", mfgDataVar.Value()))
 
-	mfgData, ok := mfgDataVar.Value().(map[uint16]dbus.Variant)
-	if !ok {
-		return
-	}
-
-	// Check for Ruuvi manufacturer ID
-	ruuviVar, ok := mfgData[RuuviManufacturerID]
-	if !ok {
-		return
-	}
-
-	payload, ok := ruuviVar.Value().([]byte)
-	if !ok || len(payload) < 1 {
+	// Extract Ruuvi payload — handle multiple D-Bus type representations
+	// that different BlueZ versions may use.
+	payload := s.extractRuuviPayload(mfgDataVar)
+	if payload == nil {
 		return
 	}
 
@@ -206,6 +251,37 @@ func (s *dbusScanner) handleDeviceProperties(path dbus.ObjectPath, props map[str
 
 	// Send payload directly (format byte + data, no manufacturer ID prefix)
 	s.handler(addr, rssi, payload)
+}
+
+// extractRuuviPayload extracts the Ruuvi payload from ManufacturerData,
+// handling the different D-Bus type representations:
+//   - map[uint16]dbus.Variant  (BlueZ 5.55+, common)
+//   - map[uint16][]byte        (some BlueZ versions)
+func (s *dbusScanner) extractRuuviPayload(mfgDataVar dbus.Variant) []byte {
+	switch mfgData := mfgDataVar.Value().(type) {
+	case map[uint16]dbus.Variant:
+		ruuviVar, ok := mfgData[RuuviManufacturerID]
+		if !ok {
+			return nil
+		}
+		payload, ok := ruuviVar.Value().([]byte)
+		if !ok || len(payload) < 1 {
+			return nil
+		}
+		return payload
+
+	case map[uint16][]byte:
+		payload, ok := mfgData[RuuviManufacturerID]
+		if !ok || len(payload) < 1 {
+			return nil
+		}
+		return payload
+
+	default:
+		s.logger.Debug("Unsupported ManufacturerData D-Bus type",
+			"type", fmt.Sprintf("%T", mfgDataVar.Value()))
+		return nil
+	}
 }
 
 // extractMAC extracts a MAC address from a BlueZ D-Bus object path.
