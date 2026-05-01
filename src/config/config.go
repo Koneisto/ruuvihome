@@ -20,11 +20,13 @@ type Config struct {
 	Logging       LoggingConfig            `yaml:"logging"`
 }
 
-// BluetoothConfig contains BLE scanner settings
+// BluetoothConfig contains BLE scanner settings.
+// Note: scan_window/scan_interval are accepted for backwards compatibility
+// but not used — BlueZ SetDiscoveryFilter doesn't expose these.
 type BluetoothConfig struct {
 	HCIDevice    int           `yaml:"hci_device"`
-	ScanWindow   time.Duration `yaml:"scan_window"`
-	ScanInterval time.Duration `yaml:"scan_interval"`
+	ScanWindow   time.Duration `yaml:"scan_window"`   // accepted, not used
+	ScanInterval time.Duration `yaml:"scan_interval"` // accepted, not used
 }
 
 // MQTTConfig contains MQTT broker settings

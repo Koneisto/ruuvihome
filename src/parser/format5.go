@@ -132,11 +132,3 @@ func ParseFormat5(data []byte) (*Measurement, error) {
 	return m, nil
 }
 
-// round rounds a float to the specified number of decimal places
-func round(val float64, precision int) float64 {
-	ratio := float64(1)
-	for i := 0; i < precision; i++ {
-		ratio *= 10
-	}
-	return float64(int(val*ratio+0.5)) / ratio
-}
