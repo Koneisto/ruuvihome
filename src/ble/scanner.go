@@ -14,6 +14,29 @@ import (
 // RuuviManufacturerID is the Bluetooth manufacturer ID for Ruuvi Innovations
 const RuuviManufacturerID = 0x0499
 
+// Tuning constants for the BLE scan loop.
+const (
+	// signalChBuffer is the D-Bus signal channel buffer size.
+	// 500 is enough to absorb bursts (e.g. 9 Ruuvi tags advertising 10/s = 90 ev/s)
+	// without blocking the D-Bus dispatcher even if the consumer briefly stalls.
+	signalChBuffer = 500
+
+	// bluezStopSettleDelay gives BlueZ time to release the previous discovery
+	// before starting a new one. Empirically 500 ms avoids "Operation in progress" errors.
+	bluezStopSettleDelay = 500 * time.Millisecond
+
+	// scanRestartDelay is how long we wait after a failed scan session
+	// before retrying. Short enough to recover quickly, long enough to avoid spam.
+	scanRestartDelay = 5 * time.Second
+
+	// signalSilenceTimeout: if no Ruuvi advertisement for this long, the
+	// session is considered dead and a fresh D-Bus connection is opened.
+	signalSilenceTimeout = 3 * time.Minute
+
+	// signalCheckInterval: how often the watchdog wakes up to check silence.
+	signalCheckInterval = 10 * time.Second
+)
+
 // AdvertisementHandler is called when a Ruuvi advertisement is received
 type AdvertisementHandler func(addr string, rssi int, manufacturerData []byte)
 
@@ -65,8 +88,8 @@ func (s *Scanner) Start(ctx context.Context) error {
 
 		err := s.runScanSession(ctx)
 		if err != nil && ctx.Err() == nil {
-			s.logger.Info("Scan session ended, restarting in 5s", "error", err)
-			time.Sleep(5 * time.Second)
+			s.logger.Info("Scan session ended, restarting", "error", err, "delay", scanRestartDelay)
+			time.Sleep(scanRestartDelay)
 			continue
 		}
 		return err
@@ -103,13 +126,13 @@ func (s *Scanner) runScanSession(ctx context.Context) error {
 
 	// Stop any old discovery, start fresh
 	adapter.Call("org.bluez.Adapter1.StopDiscovery", 0)
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(bluezStopSettleDelay)
 
 	// Subscribe to D-Bus signals
 	matchRule := "type='signal',sender='org.bluez'"
 	s.bus.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, matchRule)
 
-	signalCh := make(chan *dbus.Signal, 500)
+	signalCh := make(chan *dbus.Signal, signalChBuffer)
 	s.bus.Signal(signalCh)
 
 	err = adapter.Call("org.bluez.Adapter1.StartDiscovery", 0).Err
@@ -125,7 +148,7 @@ func (s *Scanner) runScanSession(ctx context.Context) error {
 
 	// Process signals with timeout detection
 	lastSignal := time.Now()
-	timeoutCheck := time.NewTicker(10 * time.Second)
+	timeoutCheck := time.NewTicker(signalCheckInterval)
 	defer timeoutCheck.Stop()
 
 	for {
@@ -139,9 +162,8 @@ func (s *Scanner) runScanSession(ctx context.Context) error {
 			}
 
 		case <-timeoutCheck.C:
-			// If no Ruuvi signal for 3 min, session is dead
-			if time.Since(lastSignal) > 3*time.Minute {
-				return fmt.Errorf("no BLE signals for 3 minutes")
+			if time.Since(lastSignal) > signalSilenceTimeout {
+				return fmt.Errorf("no BLE signals for %v", signalSilenceTimeout)
 			}
 		}
 	}
@@ -247,14 +269,3 @@ func extractMAC(path string) string {
 	return ""
 }
 
-// Stop stops the BLE scanner
-func (s *Scanner) Stop() error {
-	if s.bus != nil {
-		if s.adapter != "" {
-			adapter := s.bus.Object("org.bluez", s.adapter)
-			adapter.Call("org.bluez.Adapter1.StopDiscovery", 0)
-		}
-		return s.bus.Close()
-	}
-	return nil
-}

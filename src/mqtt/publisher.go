@@ -19,6 +19,12 @@ import (
 
 const (
 	publishTimeout = 5 * time.Second
+
+	// publishRetries is how many extra attempts we make if the first publish
+	// times out or returns an error. With retryDelay = 1s and 1 retry, the
+	// worst-case latency for a single tag is publishTimeout + retryDelay + publishTimeout = 11 s.
+	publishRetries = 1
+	retryDelay     = 1 * time.Second
 )
 
 // Client wraps the MQTT client
@@ -130,33 +136,51 @@ func (c *Client) Disconnect() {
 	c.client.Disconnect(1000)
 }
 
-// Publish publishes a measurement to MQTT using fast JSON encoder
+// Publish publishes a measurement to MQTT using fast JSON encoder.
+// Performs up to publishRetries+1 total attempts with retryDelay between them
+// to ride out brief broker hiccups (network blip, mosquitto reload).
 func (c *Client) Publish(ctx context.Context, m *parser.Measurement) error {
 	// Build topic efficiently
 	topic := c.cfg.MQTT.TopicPrefix + "/" + m.MAC
 
-	// Serialize to JSON using goccy/go-json (3x faster than encoding/json)
+	// Serialize to JSON using goccy/go-json (3x faster than encoding/json).
+	// Done once even if we retry — payload is identical.
 	payload, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("failed to serialize measurement: %w", err)
 	}
 
-	// Publish with timeout (no channel allocation)
-	token := c.client.Publish(topic, c.cfg.MQTT.QoS, c.cfg.MQTT.Retain, payload)
+	var lastErr error
+	for attempt := 0; attempt <= publishRetries; attempt++ {
+		// Honor cancellation between attempts
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
-	// Check context cancellation
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+		// On retry, brief backoff
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+			}
+		}
+
+		token := c.client.Publish(topic, c.cfg.MQTT.QoS, c.cfg.MQTT.Retain, payload)
+		if !token.WaitTimeout(publishTimeout) {
+			lastErr = fmt.Errorf("publish timeout (attempt %d/%d)", attempt+1, publishRetries+1)
+			continue
+		}
+		if err := token.Error(); err != nil {
+			lastErr = fmt.Errorf("publish error attempt %d/%d: %w", attempt+1, publishRetries+1, err)
+			continue
+		}
+		// Success
+		return nil
 	}
-
-	// Use WaitTimeout instead of channel
-	if !token.WaitTimeout(publishTimeout) {
-		return fmt.Errorf("publish timeout")
-	}
-
-	return token.Error()
+	return lastErr
 }
 
 // PublishRaw publishes raw bytes to a topic
