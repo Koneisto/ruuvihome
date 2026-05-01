@@ -4,8 +4,7 @@ services:
     container_name: ruuvihome
     hostname: ruuvihome
     restart: unless-stopped
-    # Raw HCI sockets (AF_BLUETOOTH) require host networking
-    # This is a Linux kernel limitation, not a software choice
+    # Host networking for BlueZ D-Bus access to BLE adapter
     network_mode: host
     cap_drop:
       - ALL
@@ -24,6 +23,11 @@ services:
           cpus: '0.5'
         reservations:
           memory: 16M
-    # user: "1000:1000"  # BLE HCI requires root for device initialization
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./config.yml:/config.yml:ro
+      - /var/run/dbus:/var/run/dbus
