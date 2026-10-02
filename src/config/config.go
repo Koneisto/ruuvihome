@@ -26,7 +26,9 @@ type Config struct {
 type BluetoothConfig struct {
 	// Mode: "dbus" (default, BlueZ discovery) or "hci" (direct HCI user channel: continuous passive scan, no
 	// periodic scan restarts — for controllers that hang on LE Set Scan Enable, e.g. BCM20702; see ble/hci_linux.go).
-	Mode         string        `yaml:"mode"`
+	Mode string `yaml:"mode"`
+	// Backend is the v1.1.0 name of the same setting ("auto", "dbus", "hci"); used only when mode is not set.
+	Backend      string        `yaml:"backend"`
 	HCIDevice    int           `yaml:"hci_device"`
 	ScanWindow   time.Duration `yaml:"scan_window"`   // used in hci mode only
 	ScanInterval time.Duration `yaml:"scan_interval"` // used in hci mode only
@@ -79,7 +81,6 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		// Set defaults
 		Bluetooth: BluetoothConfig{
-			Mode:         "dbus",
 			HCIDevice:    0,
 			ScanWindow:   10 * time.Millisecond,
 			ScanInterval: 10 * time.Millisecond,
@@ -117,7 +118,14 @@ func Load(path string) (*Config, error) {
 // Validate checks the configuration for errors
 func (c *Config) Validate() error {
 	if c.Bluetooth.Mode == "" {
-		c.Bluetooth.Mode = "dbus"
+		switch c.Bluetooth.Backend {
+		case "hci":
+			c.Bluetooth.Mode = "hci"
+		case "", "auto", "dbus":
+			c.Bluetooth.Mode = "dbus"
+		default:
+			return fmt.Errorf("bluetooth.backend must be auto, dbus or hci, got %q", c.Bluetooth.Backend)
+		}
 	}
 	if c.Bluetooth.Mode != "dbus" && c.Bluetooth.Mode != "hci" {
 		return fmt.Errorf("bluetooth.mode must be dbus or hci, got %q", c.Bluetooth.Mode)

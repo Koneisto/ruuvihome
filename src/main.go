@@ -22,10 +22,11 @@ import (
 )
 
 var (
-	configPath        = flag.String("config", "/config.yml", "Path to configuration file")
-	healthcheckMode   = flag.Bool("healthcheck", false, "Probe health endpoint and exit 0/1 (for Docker HEALTHCHECK)")
-	healthAddr        = flag.String("health-addr", "127.0.0.1:9100", "TCP address for the /health HTTP endpoint")
-	version           = "1.0.0"
+	configPath         = flag.String("config", "/config.yml", "Path to configuration file")
+	healthcheckMode    = flag.Bool("healthcheck", false, "Probe health endpoint and exit 0/1 (for Docker HEALTHCHECK)")
+	healthAddr         = flag.String("health-addr", "127.0.0.1:9100", "TCP address for the /health HTTP endpoint")
+	version            = "1.2.0"
+	e1PreferWindow     = 5 * time.Minute // format 6 frames ignored this long after an E1 frame from the same device
 	healthCheckTimeout = 3 * time.Second
 )
 
@@ -136,6 +137,11 @@ func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 	// Observability counters + per-tag last-seen tracking
 	var obs observability
 
+	// Ruuvi Air sends the same measurement as format 6 (legacy advertising) and format E1 (extended
+	// advertising, more precise). Once E1 is heard from a device, its format 6 frames are ignored, so the
+	// published values do not alternate between the two under the per-device rate limit.
+	var lastE1 sync.Map
+
 	// Create BLE scanner with advertisement handler
 	scanner, err := ble.NewScanner(cfg, logger, func(addr string, rssi int, manufacturerData []byte) {
 		// Normalize MAC to uppercase (go-ble returns lowercase)
@@ -155,6 +161,17 @@ func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 		// This keeps the silence detector from false-positiving when the radio is fine.
 		obs.lastSeen.Store(addr, time.Now())
 		obs.totalAdvertisements.Add(1)
+
+		if len(manufacturerData) > 0 {
+			switch manufacturerData[0] {
+			case 0xE1:
+				lastE1.Store(addr, time.Now())
+			case 0x06:
+				if t, ok := lastE1.Load(addr); ok && time.Since(t.(time.Time)) < e1PreferWindow {
+					return
+				}
+			}
+		}
 
 		// Check rate limit BEFORE parsing (avoid unnecessary work)
 		if !rateLimiter.Allow(addr) {
