@@ -20,12 +20,21 @@
 # Configure the Bluetooth Low Energy (BLE) adapter used for scanning.
 #
 bluetooth:
-  # HCI adapter index (0 = hci0, 1 = hci1, etc.)
+  # Scanning mode:
+  #   dbus - (default) BlueZ discovery over D-Bus; the adapter stays shared with BlueZ.
+  #          BlueZ restarts LE scanning every 10.24 s; some controllers hang on that.
+  #   hci  - direct HCI user channel: the controller is reset once and scans continuously
+  #          (passive). Bluetooth 5 adapters scan extended advertising on LE 1M and LE Coded,
+  #          so Ruuvi Air format E1 is received. Takes the adapter exclusively from BlueZ.
+  #          Requires network_mode: host and CAP_NET_ADMIN (the provided docker-compose.yml has both).
+  # The v1.1.0 key "backend: auto|dbus|hci" is still accepted when mode is not set.
+  mode: dbus
+
+  # HCI adapter index (0 = hci0, 1 = hci1, etc.), used in hci mode
   # Run 'hciconfig' to see available adapters on your system
   hci_device: 0
 
-  # BLE scanning parameters - lower values = more responsive but higher CPU
-  # Default values work well for most setups
+  # Scan timing in hci mode (window <= interval; 10ms/10ms = continuous)
   scan_window: 10ms
   scan_interval: 10ms
 

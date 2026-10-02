@@ -28,6 +28,12 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "/ruuvihome", "-healthcheck"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     volumes:
       - ./config.yml:/config.yml:ro
       - /var/run/dbus:/var/run/dbus
