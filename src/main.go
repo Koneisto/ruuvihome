@@ -27,6 +27,7 @@ var (
 	healthAddr         = flag.String("health-addr", "127.0.0.1:9100", "TCP address for the /health HTTP endpoint")
 	version            = "1.2.0"
 	e1PreferWindow     = 5 * time.Minute // format 6 frames ignored this long after an E1 frame from the same device
+	publishQueueSize   = 64              // measurements waiting for MQTT; a full queue drops (each tag publishes at most once per min_interval)
 	healthCheckTimeout = 3 * time.Second
 )
 
@@ -142,6 +143,28 @@ func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 	// published values do not alternate between the two under the per-device rate limit.
 	var lastE1 sync.Map
 
+	// MQTT publishing runs in its own goroutine (as in v1.1.0): the BLE callback never blocks on network I/O.
+	// In hci mode the callback runs in the HCI read loop, so a slow broker would otherwise stall reception.
+	publishCh := make(chan *parser.Measurement, publishQueueSize)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case m := <-publishCh:
+				sanitized := getSanitizedMAC(m.MAC)
+				if err := mqttClient.Publish(ctx, m); err != nil {
+					obs.publishFailures.Add(1)
+					logger.Error("Failed to publish measurement", "mac", sanitized, "error", err)
+					continue
+				}
+				obs.publishedTotal.Add(1)
+				logger.Debug("Published measurement", "mac", sanitized, "name", m.Name,
+					"temp", m.Temperature, "humidity", m.Humidity, "format", m.Format)
+			}
+		}
+	}()
+
 	// Create BLE scanner with advertisement handler
 	scanner, err := ble.NewScanner(cfg, logger, func(addr string, rssi int, manufacturerData []byte) {
 		// Normalize MAC to uppercase (go-ble returns lowercase)
@@ -210,20 +233,13 @@ func run(ctx context.Context, cfg *config.Config, logger *config.Logger) error {
 			}
 		}
 
-		// Publish measurement to MQTT
-		if err := mqttClient.Publish(ctx, measurement); err != nil {
+		// Queue for the publisher goroutine (non-blocking)
+		select {
+		case publishCh <- measurement:
+		default:
 			obs.publishFailures.Add(1)
-			logger.Error("Failed to publish measurement", "mac", sanitized, "error", err)
-			return
+			logger.Warn("Publish queue full, dropping measurement", "mac", sanitized)
 		}
-
-		obs.publishedTotal.Add(1)
-		logger.Debug("Published measurement",
-			"mac", sanitized,
-			"name", measurement.Name,
-			"temp", measurement.Temperature,
-			"humidity", measurement.Humidity,
-			"format", measurement.Format)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create BLE scanner: %w", err)
