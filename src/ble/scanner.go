@@ -47,6 +47,9 @@ type Scanner struct {
 	handler AdvertisementHandler
 	bus     *dbus.Conn
 	adapter dbus.ObjectPath
+	// lastRSSI caches the latest RSSI per device path. BlueZ's PropertiesChanged omits RSSI when it did not
+	// change; the cache avoids a synchronous D-Bus GetProperty round-trip for every such advertisement.
+	lastRSSI map[dbus.ObjectPath]int
 }
 
 // NewScanner creates a new BLE scanner
@@ -86,7 +89,12 @@ func (s *Scanner) Start(ctx context.Context) error {
 		default:
 		}
 
-		err := s.runScanSession(ctx)
+		var err error
+		if s.cfg.Bluetooth.Mode == "hci" { // direct HCI, continuous passive scan (hci_linux.go)
+			err = s.runHCISession(ctx)
+		} else {
+			err = s.runScanSession(ctx)
+		}
 		if err != nil && ctx.Err() == nil {
 			s.logger.Info("Scan session ended, restarting", "error", err, "delay", scanRestartDelay)
 			time.Sleep(scanRestartDelay)
@@ -128,9 +136,15 @@ func (s *Scanner) runScanSession(ctx context.Context) error {
 	adapter.Call("org.bluez.Adapter1.StopDiscovery", 0)
 	time.Sleep(bluezStopSettleDelay)
 
-	// Subscribe to D-Bus signals
-	matchRule := "type='signal',sender='org.bluez'"
-	s.bus.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, matchRule)
+	// Subscribe to D-Bus signals (narrowed to configured tags in filter_mode=named, see matchRules)
+	s.lastRSSI = make(map[dbus.ObjectPath]int)
+	rules := s.matchRules()
+	for _, rule := range rules {
+		if err := s.bus.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, rule).Err; err != nil {
+			return fmt.Errorf("AddMatch %q: %w", rule, err)
+		}
+	}
+	s.logger.Info("D-Bus match rules set", "rules", len(rules), "filter_mode", s.cfg.Processing.FilterMode)
 
 	signalCh := make(chan *dbus.Signal, signalChBuffer)
 	s.bus.Signal(signalCh)
@@ -167,6 +181,32 @@ func (s *Scanner) runScanSession(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// matchRules returns the D-Bus match rules for this session.
+//
+// With filter_mode=named only the configured tags' device objects are subscribed, so dbus-daemon drops the
+// advertisements of every other nearby BLE device (phones, TVs, beacons) before they reach this process.
+// With DuplicateData=true BlueZ emits a PropertiesChanged signal per advertisement, so in a busy radio
+// environment the broad rule made the scanner wake and decode dozens of irrelevant signals per second
+// (measured ~35 % of a Pi 3B+ core). filter_mode=all keeps the original broad rule.
+func (s *Scanner) matchRules() []string {
+	if s.cfg.Processing.FilterMode != "named" || len(s.cfg.Devices) == 0 {
+		return []string{"type='signal',sender='org.bluez'"}
+	}
+	rules := make([]string, 0, 2*len(s.cfg.Devices))
+	for mac := range s.cfg.Devices {
+		path := devicePath(s.adapter, mac)
+		rules = append(rules,
+			fmt.Sprintf("type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',path='%s'", path),
+			fmt.Sprintf("type='signal',sender='org.bluez',interface='org.freedesktop.DBus.ObjectManager',member='InterfacesAdded',arg0path='%s'", path))
+	}
+	return rules
+}
+
+// devicePath maps a MAC address to its BlueZ object path, e.g. /org/bluez/hci0/dev_C8_8A_AB_3D_7B_E8.
+func devicePath(adapter dbus.ObjectPath, mac string) string {
+	return string(adapter) + "/dev_" + strings.ReplaceAll(strings.ToUpper(mac), ":", "_")
 }
 
 // processSignal handles D-Bus signals, returns true if it was a Ruuvi advertisement
@@ -237,6 +277,8 @@ func (s *Scanner) handleDeviceProperties(path dbus.ObjectPath, props map[string]
 		if v, ok := rssiVar.Value().(int16); ok {
 			rssi = int(v)
 		}
+	} else if cached, ok := s.lastRSSI[path]; ok {
+		rssi = cached // RSSI unchanged since the previous advertisement
 	} else if s.bus != nil {
 		device := s.bus.Object("org.bluez", path)
 		rssiProp, err := device.GetProperty("org.bluez.Device1.RSSI")
@@ -245,6 +287,10 @@ func (s *Scanner) handleDeviceProperties(path dbus.ObjectPath, props map[string]
 				rssi = int(v)
 			}
 		}
+	}
+
+	if s.lastRSSI != nil && rssi != 0 {
+		s.lastRSSI[path] = rssi
 	}
 
 	s.logger.Trace("Ruuvi advertisement received",
@@ -268,4 +314,3 @@ func extractMAC(path string) string {
 	}
 	return ""
 }
-
