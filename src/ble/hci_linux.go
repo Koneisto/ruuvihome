@@ -16,7 +16,7 @@ import (
 // Why: BlueZ D-Bus discovery stops and restarts LE scanning every 10.24 s (kernel DISCOV_LE_TIMEOUT, bluetoothd
 // re-arms it): measured with btmon 24 × LE Set Scan Enable per 2 min, ~8600 per day. The Broadcom BCM20702 in the
 // ASUS USB-BT400 hangs on that command roughly once per 200–300 toggles ("command 0x200c tx timeout",
-// "Unable to disable scanning") — at Vakkatie every ~35 min, each hang a 2+ min gap in data. The same software on a
+// "Unable to disable scanning"), about every 35 min, each hang a 2+ min gap in data. The same software on a
 // Realtek RTL8761B (USB-BT500) had zero errors in 7 days, so the trigger is the toggling on this chip.
 //
 // This mode takes the controller exclusively (HCI_CHANNEL_USER, bluetoothd stops managing it), resets it once,

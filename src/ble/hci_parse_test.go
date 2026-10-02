@@ -84,7 +84,7 @@ func TestScanUnits(t *testing.T) {
 	}
 }
 
-// Extended report (Ruuvi Air E1 seen on Kekinkallio: primary LE 1M, secondary LE 2M): 24-byte header before the data.
+// Extended report (Ruuvi Air E1 as seen with btmon: primary LE 1M, secondary LE 2M): 24-byte header before the data.
 func extEvent(status byte, data []byte) []byte {
 	rep := []byte{0x01 | status<<5, 0x00, 0x01, 0x98, 0xEA, 0x3D, 0x4F, 0x7C, 0xF3, 0x01, 0x02, 0x03, 0x7F, 0xB0, 0, 0, 0, 0, 0, 0, 0, 0, 0, byte(len(data))}
 	rep = append(rep, data...)
