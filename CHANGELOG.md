@@ -4,6 +4,14 @@ All notable changes to ruuvihome are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.1] - 2026-10-18
+
+### Security
+- Update MQTT/WebSocket/network dependencies to patched versions.
+- Build with pinned Go 1.27.2; verify modules and prohibit implicit dependency changes during builds.
+- Keep scanner, MQTT payloads and deployment configuration unchanged.
+- Verified with `go test ./...`, `go vet ./...` and `govulncheck ./...`.
+
 ## [1.2.0] - 2026-10-03
 
 ### Added
