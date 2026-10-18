@@ -25,7 +25,7 @@ var (
 	configPath         = flag.String("config", "/config.yml", "Path to configuration file")
 	healthcheckMode    = flag.Bool("healthcheck", false, "Probe health endpoint and exit 0/1 (for Docker HEALTHCHECK)")
 	healthAddr         = flag.String("health-addr", "127.0.0.1:9100", "TCP address for the /health HTTP endpoint")
-	version            = "1.2.0"
+	version            = "1.2.1"
 	e1PreferWindow     = 5 * time.Minute // format 6 frames ignored this long after an E1 frame from the same device
 	publishQueueSize   = 64              // measurements waiting for MQTT; a full queue drops (each tag publishes at most once per min_interval)
 	healthCheckTimeout = 3 * time.Second
